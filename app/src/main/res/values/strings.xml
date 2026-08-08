@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Kettenblatt</string>
+    <!-- app_name comes from build.gradle.kts, so a nightly can label itself
+         differently on the launcher. Declaring it here too would collide. -->
 
     <string name="routes_title">Routes</string>
     <string name="import_route">Import route</string>

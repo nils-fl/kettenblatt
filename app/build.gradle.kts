@@ -26,6 +26,24 @@ val releaseVersion: String? = System.getenv("GITHUB_REF_NAME")
     ?.takeIf { Regex("""^v\d+\.\d+\.\d+$""").matches(it) }
     ?.removePrefix("v")
 
+/**
+ * A nightly: the tip of main, signed and installable, but not a release.
+ *
+ * `NIGHTLY_STAMP` is yyMMddHH, which is both the versionCode and monotonic
+ * without any stored counter, so a rebuild an hour later always supersedes.
+ * `NIGHTLY_SHA` is the short commit, because the only useful question about a
+ * nightly is which one it is.
+ *
+ * A nightly takes its own applicationId, so it installs *beside* a release
+ * rather than replacing it. That is the whole safety of the channel: nothing
+ * about trying one can take away the version you rely on, and the two keep
+ * separate route libraries and ride histories.
+ */
+val nightlyStamp: String? = System.getenv("NIGHTLY_STAMP")
+    ?.takeIf { Regex("""^\d{8}$""").matches(it) }
+val nightlySha: String? = System.getenv("NIGHTLY_SHA")?.take(7)?.ifBlank { null }
+val isNightly = nightlyStamp != null && releaseVersion == null
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -38,7 +56,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "de.kettenblatt"
+        applicationId = if (isNightly) "de.kettenblatt.nightly" else "de.kettenblatt"
         minSdk = 34
         targetSdk = 36
         versionCode = releaseVersion
@@ -46,8 +64,19 @@ android {
             ?.let { (major, minor, patch) ->
                 major.toInt() * 10_000 + minor.toInt() * 100 + patch.toInt()
             }
+            // Far above any release code, which is deliberate but harmless: the
+            // two channels are different applications and never compare.
+            ?: nightlyStamp?.toInt()
             ?: 1
-        versionName = releaseVersion ?: "dev"
+        versionName = when {
+            releaseVersion != null -> releaseVersion
+            isNightly -> listOfNotNull("nightly", nightlyStamp, nightlySha).joinToString("-")
+            else -> "dev"
+        }
+
+        // Named apart on the launcher too. Someone running both should never
+        // have to guess which icon is the one they trust.
+        resValue("string", "app_name", if (isNightly) "Kettenblatt Nightly" else "Kettenblatt")
     }
 
     signingConfigs {
