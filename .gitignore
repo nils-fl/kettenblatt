@@ -11,6 +11,10 @@ local.properties
 *.jks
 keystore.properties
 
+# API keys. The Thunderforest key lives here for local testing; the app itself
+# stores it in settings, so nothing in the build needs it.
+.env
+
 # Prepared bundles and offline map packs are outputs, not sources.
 *.mbtiles
 
