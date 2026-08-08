@@ -42,6 +42,7 @@ import de.kettenblatt.data.RouteMeta
 import de.kettenblatt.data.Backup
 import de.kettenblatt.data.SettingsCodec
 import de.kettenblatt.data.RouteStore
+import de.kettenblatt.prep.Network
 import de.kettenblatt.prep.PrepStage
 import de.kettenblatt.prep.RoutePreparer
 import de.kettenblatt.prep.TilePack
@@ -54,6 +55,7 @@ import de.kettenblatt.ui.plural
 import de.kettenblatt.data.SettingsStore
 import de.kettenblatt.nav.NavigationRepository
 import de.kettenblatt.nav.NavigationService
+import de.kettenblatt.ui.ArrivedScreen
 import de.kettenblatt.ui.NavigationScreen
 import de.kettenblatt.ui.RideHistoryScreen
 import de.kettenblatt.ui.RouteListScreen
@@ -103,6 +105,42 @@ class MainActivity : ComponentActivity() {
 /** How long an interrupted ride stays offerable as a resume. */
 private const val RESUME_WINDOW_MS = 6 * 60 * 60 * 1000L
 
+/** What a match run produced, whichever screen asked for it. */
+private data class MatchOutcome(
+    val prepared: de.kettenblatt.prep.Prepared,
+    /** Refreshed meta, or null when the result was not worth keeping. */
+    val updated: RouteMeta?,
+    val kept: Boolean,
+)
+
+/**
+ * Match a route against OpenStreetMap and rewrite its stored bundle.
+ *
+ * Deliberately says nothing about which screen asked. The preview drives a
+ * progress card from [onStage]; an automatic match on import has only a chip on
+ * the route's row. One code path, two surfaces -- and the rule that a failed
+ * match must never replace cues already on the phone lives here, where a second
+ * caller cannot skip it.
+ */
+private suspend fun matchRoute(
+    store: RouteStore,
+    valhallaUrl: String,
+    meta: RouteMeta,
+    route: Route,
+    onStage: (PrepStage) -> Unit = {},
+): MatchOutcome = withContext(Dispatchers.IO) {
+    val prepared = RoutePreparer(Valhalla(valhallaUrl), onStage).prepare(route)
+    // Never trade working guidance for none. Matching is best-effort when a
+    // route has no cues yet, but a re-match that fails -- no signal, a server
+    // having a bad day -- must not wipe the 70 turns already on the phone.
+    val kept = prepared.route.hasGuidance || !route.hasGuidance
+    // Preparing rewrites the stored file under a new name, so any meta held
+    // elsewhere is stale from here on -- and a stale one points at a file that
+    // no longer exists.
+    val updated = if (kept) store.replaceBundle(meta.id, prepared.bundle) else null
+    MatchOutcome(prepared, updated, kept)
+}
+
 @Composable
 private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit) {
     val context = LocalContext.current
@@ -112,6 +150,7 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
 
     val route by NavigationRepository.route.collectAsState()
     val navState by NavigationRepository.state.collectAsState()
+    val arrival by NavigationRepository.arrival.collectAsState()
 
     // Reading a route means pulling a whole file through a content provider and
     // parsing it. A cloud-backed URI is a network round-trip and a recorded GPX
@@ -155,38 +194,23 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
     fun prepareRoute(meta: RouteMeta, route: Route) {
         prep = PrepState(stage = PrepStage.MATCHING)
         scope.launch {
-            val outcome = runCatching {
-                withContext(Dispatchers.IO) {
-                    val preparer = RoutePreparer(Valhalla(settings.valhallaUrl)) { stage ->
-                        prep = prep.copy(stage = stage)
-                    }
-                    val prepared = preparer.prepare(route)
-                    // Never trade working guidance for none. Matching is
-                    // best-effort when a route has no cues yet, but a re-match
-                    // that fails -- no signal, a server having a bad day --
-                    // must not wipe the 70 turns already on the phone.
-                    val keep = prepared.route.hasGuidance || !route.hasGuidance
-                    // Preparing rewrites the stored file under a new name, so
-                    // the meta the preview is holding is stale from here on --
-                    // and a stale one points at a file that no longer exists.
-                    val updated = if (keep) store.replaceBundle(meta.id, prepared.bundle) else null
-                    Triple(prepared, updated, keep)
+            runCatching {
+                matchRoute(store, settings.valhallaUrl, meta, route) { stage ->
+                    prep = prep.copy(stage = stage)
                 }
-            }
-
-            outcome.onSuccess { (prepared, updated, keep) ->
+            }.onSuccess { outcome ->
                 routes = withContext(Dispatchers.IO) { store.list() }
-                updated?.let { preview = it }
-                if (keep) previewRoute = prepared.route
+                outcome.updated?.let { preview = it }
+                if (outcome.kept) previewRoute = outcome.prepared.route
                 prep = PrepState(
-                    warnings = prepared.warnings,
+                    warnings = outcome.prepared.warnings,
                     done = when {
-                        prepared.route.hasGuidance ->
-                            "${prepared.route.maneuvers.size} turns" +
-                                if (prepared.route.hasReverseGuidance) {
-                                    ", ${prepared.route.reverseManeuvers.size} the other way"
+                        outcome.prepared.route.hasGuidance ->
+                            "${outcome.prepared.route.maneuvers.size} turns" +
+                                if (outcome.prepared.route.hasReverseGuidance) {
+                                    ", ${outcome.prepared.route.reverseManeuvers.size} the other way"
                                 } else ""
-                        keep -> "No usable match; the route still works on geometry alone."
+                        outcome.kept -> "No usable match; the route still works on geometry alone."
                         else -> "Matching failed, so the cues already on this route were kept."
                     },
                 )
@@ -196,13 +220,61 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
         }
     }
 
+    // Routes waiting for or undergoing an automatic match, head first.
+    //
+    // A list rather than a set because it is also a queue: the public Valhalla
+    // asks for roughly a call a second and a route costs four, so two imports in
+    // a row are matched one after the other rather than at once.
+    var autoMatching by remember { mutableStateOf(emptyList<String>()) }
+    val navigating = route != null
+
+    // Keyed on the head, so finishing one starts the next; and on whether a ride
+    // is under way, because nothing prepares a route while its owner is on the
+    // road. Declared above the early returns below on purpose -- a LaunchedEffect
+    // under one of them is torn down the moment the rider opens a route, which
+    // would cancel the match mid-flight.
+    LaunchedEffect(autoMatching.firstOrNull(), navigating) {
+        if (navigating) return@LaunchedEffect
+        val id = autoMatching.firstOrNull() ?: return@LaunchedEffect
+        val meta = withContext(Dispatchers.IO) { store.find(id) }
+        if (meta != null) {
+            runCatching {
+                val loaded = withContext(Dispatchers.IO) { store.load(meta) }
+                matchRoute(store, settings.valhallaUrl, meta, loaded)
+            }.onSuccess { outcome ->
+                // The preview may be open on this very route. Matching rewrote
+                // the stored file under a new name, so the meta that screen is
+                // holding now points at a file that no longer exists -- which
+                // turns Start ride into "could not open route".
+                if (preview?.id == id) {
+                    outcome.updated?.let { preview = it }
+                    if (outcome.kept) previewRoute = outcome.prepared.route
+                }
+            }
+            // Silent on failure by design: the route already navigates, and the
+            // preview still offers to match it by hand with the reason shown.
+            routes = withContext(Dispatchers.IO) { store.list() }
+        }
+        autoMatching = autoMatching.drop(1)
+    }
+
     fun downloadTiles(meta: RouteMeta, route: Route) {
+        val source = settings.mapStyle
+        // The button is disabled for these, but the rule belongs with the
+        // download rather than with whatever happens to be able to start one.
+        if (!source.canDownload) {
+            prep = PrepState(
+                error = "${source.name} cannot be packed for offline use. " +
+                    "Choose ${TileSource.DOWNLOADABLE.joinToString(" or ") { it.name }} in Settings.",
+            )
+            return
+        }
+
         cancelTiles = false
         prep = PrepState(tiles = TileProgress(0, 0, 0))
         scope.launch {
             val outcome = runCatching {
                 withContext(Dispatchers.IO) {
-                    val source = TileSource.byKey(settings.tileSource)
                     val plan = TilePack.plan(
                         points = route.points,
                         source = source,
@@ -210,7 +282,15 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
                         zoomMax = settings.tileZoomMax,
                         bufferM = settings.tileBufferM,
                     )
-                    prep = prep.copy(tiles = TileProgress(0, plan.tiles.size, 0))
+                    // What it will cost, before it costs it. A rider taps
+                    // Offline map without first reading a zoom slider, and the
+                    // deepest level alone is most of the pack.
+                    prep = prep.copy(
+                        tiles = TileProgress(0, plan.tiles.size, 0),
+                        tilePlanSummary = "${plan.tiles.size} tiles, about " +
+                            "${formatBytes(plan.estimatedBytes)} at " +
+                            "z${plan.zoomMin}–${plan.zoomMax}",
+                    )
 
                     val file = store.tilesFileFor(meta.id)
                     TilePack.download(
@@ -221,7 +301,7 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
                             route.points.minOf { it.lat }, route.points.minOf { it.lon },
                             route.points.maxOf { it.lat }, route.points.maxOf { it.lon },
                         ),
-                        apiKey = settings.thunderforestKey.ifBlank { null },
+                        apiKey = settings.tileApiKey,
                         shouldContinue = { !cancelTiles },
                         onProgress = { prep = prep.copy(tiles = it) },
                     )
@@ -259,8 +339,30 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
         }
     }
 
+    /**
+     * Ask for cues on a freshly imported route, if the moment is right.
+     *
+     * Silent when it declines. An import that lands on mobile data, or with this
+     * switched off, is not a failure -- the route works as it is, and the preview
+     * still offers to match it.
+     */
+    fun enqueueAutoMatch(meta: RouteMeta) {
+        if (!settings.autoMatchOnImport) return
+        // A bundle that arrived with cues has nothing to gain, and a re-match
+        // could only lose them. Read off the meta, so nothing is loaded to decide.
+        if (meta.hasGuidance) return
+        // Four Valhalla calls belong on wifi, not on someone's data allowance.
+        if (!Network.isUnmetered(context)) return
+        if (meta.id !in autoMatching) autoMatching = autoMatching + meta.id
+    }
+
     fun importFrom(uri: Uri) = withStore("Unrecognised file") {
-        withContext(Dispatchers.IO) { store.import(uri, System.currentTimeMillis()) }
+        val imported = withContext(Dispatchers.IO) { store.import(uri, System.currentTimeMillis()) }
+        // A plain GPX is navigable as it stands; cues are the only thing missing,
+        // so ask for them here rather than making the rider find the button. Both
+        // the picker and the share sheet funnel through here, which is why the
+        // hook goes here and not at the two call sites.
+        enqueueAutoMatch(imported)
     }
 
     // A route shared into the app is imported as soon as it arrives.
@@ -380,7 +482,15 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
         busy = true
         active = meta
         scope.launch {
-            runCatching { withContext(Dispatchers.IO) { store.load(meta) } }
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    // Re-read rather than trusting the meta the screen is
+                    // holding: a background match rewrites the stored file under
+                    // a new name, and a meta captured before it points at a file
+                    // that has since been deleted.
+                    store.load(store.find(meta.id) ?: meta)
+                }
+            }
                 .onSuccess {
                     NavigationRepository.start(meta.id, if (reversed) it.reversed() else it)
                     NavigationService.start(context)
@@ -410,6 +520,28 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
     // The screen has to stay awake while navigating; that is the whole point of
     // having it mounted on a handlebar.
     KeepScreenOn(enabled = route != null && settings.keepScreenOn)
+
+    // Ahead of the navigation screen, and outside it: the service stops itself a
+    // minute after the finish, and the summary has to survive that rather than
+    // vanish from under the rider mid-read.
+    val finished = arrival
+    if (finished != null) {
+        ArrivedScreen(
+            ride = finished,
+            units = settings.units,
+            stillNavigating = route != null,
+            onDone = {
+                NavigationService.stop(context)
+                NavigationRepository.clearArrival()
+                active = null
+                // The ride has just been written; without this the history list
+                // is missing the one ride the rider is most likely to open.
+                scope.launch { rides = withContext(Dispatchers.IO) { rideStore.list() } }
+            },
+            onKeepRiding = { NavigationRepository.clearArrival() },
+        )
+        return
+    }
 
     val current = route
     if (current != null && active != null) {
@@ -481,7 +613,7 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
             route = previewLoaded,
             reversed = previewReversed,
             offlineTiles = store.tilesFile(previewing),
-            units = settings.units,
+            settings = settings,
             prep = prep,
             onSetReversed = { previewReversed = it },
             onPrepare = { prepareRoute(previewing, previewLoaded) },
@@ -524,6 +656,7 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
         error = error,
         busy = busy,
         units = settings.units,
+        matching = autoMatching,
         onImport = {
             // Many providers report .gpx and .navi.json as octet-stream, so the
             // filter has to be broad; the extension check happens on import.
@@ -556,6 +689,11 @@ private fun App(store: RouteStore, incoming: Uri?, onIncomingHandled: () -> Unit
         onAttachTiles = { meta ->
             attachingTilesTo = meta.id
             tilePicker.launch(arrayOf("application/octet-stream", "*/*"))
+        },
+        onRemoveTiles = { meta ->
+            withStore("Could not remove the offline map") {
+                withContext(Dispatchers.IO) { store.removeTiles(meta.id) }
+            }
         },
         onRename = { meta, name ->
             withStore("Could not rename route") {

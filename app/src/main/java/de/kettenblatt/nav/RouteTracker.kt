@@ -13,6 +13,18 @@ import kotlin.math.min
 /** Everything the UI and the notification need, recomputed on each fix. */
 data class NavState(
     val snappedIndex: Int,
+    /**
+     * Where on the route the fix actually falls, interpolated along the segment
+     * rather than rounded to [snappedIndex].
+     *
+     * Segments average 29 m on the reference route, so a position taken from the
+     * nearest track point moves in 29 m steps. That is fine for splitting the
+     * line into ridden and remaining, and useless for placing the chevron or
+     * aiming the camera -- both of which are supposed to move the way the rider
+     * does, continuously.
+     */
+    val snappedLat: Double,
+    val snappedLon: Double,
     val crossTrackM: Double,
     val distanceAlongM: Double,
     val distanceRemainingM: Double,
@@ -194,8 +206,16 @@ class RouteTracker(
         // at its very last point, which is still gravel.
         val unpaved = route.unpavedSpans.firstOrNull { route.cumDistM[it.to] >= distanceAlong }
 
+        // Straight lerp in degrees: over a single segment -- 29 m on the
+        // reference route, and never more than a few hundred -- the difference
+        // from a great-circle interpolation is far below a millimetre.
+        val segFrom = route.points[snap.segment]
+        val segTo = route.points[snap.segment + 1]
+
         val newState = NavState(
             snappedIndex = snap.index,
+            snappedLat = segFrom.lat + snap.t * (segTo.lat - segFrom.lat),
+            snappedLon = segFrom.lon + snap.t * (segTo.lon - segFrom.lon),
             crossTrackM = snap.distanceM,
             distanceAlongM = distanceAlong,
             distanceRemainingM = remaining,

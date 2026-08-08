@@ -224,6 +224,32 @@ class RideTest {
     }
 
     @Test
+    fun `the arrival snapshot summarises the ride without committing it`() {
+        // The summary is wanted the moment the finish is crossed, while the rider
+        // may still choose to carry on -- so nothing may be closed off on disk.
+        val store = RideStore(dir)
+        val recorder = RideRecorder(store, ride(emptyList()), flushIntervalMs = 30_000)
+        val covered = CoveredSegments(BooleanArray(4) { it < 3 })
+
+        trail(20).forEach { recorder.record(it.lat, it.lon, it.ele, it.timeMs, covered) }
+
+        val snapshot = recorder.snapshot(covered, endedAtMs = 1_700_000_300_000)
+        assertEquals(20, snapshot.trail.size)
+        assertEquals(listOf(listOf(0, 3)), snapshot.coveredRuns)
+        assertTrue(snapshot.isFinished)
+        assertEquals(190.0, snapshot.distanceM, 5.0)
+
+        // Still open on disk, and still resumable, because the rider might yet
+        // ride on past the finish.
+        assertNotNull(store.active())
+        assertFalse(requireNotNull(store.active()).isFinished)
+
+        // Taking one does not stop the recorder from carrying on.
+        recorder.record(51.0, 6.01, 30.0, 1_700_000_400_000, covered)
+        assertEquals(21, recorder.finish(covered, 1_700_000_400_000).trail.size)
+    }
+
+    @Test
     fun `the recorder discards a ride nobody rode`() {
         val store = RideStore(dir)
         val recorder = RideRecorder(store, ride(emptyList()))

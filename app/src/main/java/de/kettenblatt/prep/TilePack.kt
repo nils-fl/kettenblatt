@@ -13,15 +13,36 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.tan
 
-/** A raster tile source that permits caching. */
+/**
+ * A raster map style, for the live map and for a pack built from it.
+ *
+ * Deliberately one description rather than two: the live map used to be
+ * hardcoded elsewhere, so the map a route was planned on was not the map it was
+ * ridden with, and a junction stopped looking familiar between the two.
+ */
 data class TileSource(
     val key: String,
     val name: String,
+    /**
+     * Label for the picker.
+     *
+     * Not derived from [name]: the two Thunderforest styles share a first word,
+     * so cutting at the space gave two segments both reading "Thunderforest".
+     */
+    val shortName: String,
     val urlTemplate: String,
     val maxZoom: Int,
     val attribution: String,
     val needsKey: Boolean = false,
     val subdomains: List<String> = emptyList(),
+    /**
+     * Whether a pack may be built from this style.
+     *
+     * A licence question, not a capability one: the OSM Foundation's tile policy
+     * forbids bulk download, and osmdroid enforces it with FLAG_NO_BULK. A style
+     * that says no here is browsed online and never packed.
+     */
+    val canDownload: Boolean = true,
 ) {
     fun url(z: Int, x: Int, y: Int, apiKey: String?): String = urlTemplate
         .replace("{s}", if (subdomains.isEmpty()) "" else subdomains[(x + y) % subdomains.size])
@@ -38,6 +59,7 @@ data class TileSource(
             TileSource(
                 key = "opentopomap",
                 name = "OpenTopoMap",
+                shortName = "Topo",
                 urlTemplate = "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
                 maxZoom = 17,
                 attribution = "Map data (c) OpenStreetMap contributors, SRTM | " +
@@ -50,6 +72,7 @@ data class TileSource(
             TileSource(
                 key = "thunderforest-outdoors",
                 name = "Thunderforest Outdoors",
+                shortName = "Outdoors",
                 urlTemplate = "https://tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey={key}",
                 maxZoom = 22,
                 attribution = "Maps (c) Thunderforest, Data (c) OpenStreetMap contributors",
@@ -58,12 +81,39 @@ data class TileSource(
             TileSource(
                 key = "thunderforest-cycle",
                 name = "Thunderforest OpenCycleMap",
+                shortName = "Cycle",
                 urlTemplate = "https://tile.thunderforest.com/cycle/{z}/{x}/{y}.png?apikey={key}",
                 maxZoom = 22,
                 attribution = "Maps (c) Thunderforest, Data (c) OpenStreetMap contributors",
                 needsKey = true,
             ),
+            // The default OpenStreetMap rendering -- the map most people picture
+            // when they picture OSM, and the calmest of these in a town centre.
+            //
+            // Online only: the Foundation's tile policy forbids bulk download.
+            // Listed anyway, because a style list that omits the familiar one
+            // leaves the rider wondering what they are looking at. Kept last so
+            // byKey's fallback stays a style that can actually be packed.
+            TileSource(
+                key = OSM_STANDARD_KEY,
+                name = "OSM Standard",
+                shortName = "Standard",
+                // Never fetched from: the live map uses osmdroid's own MAPNIK,
+                // which carries the policy flags, and canDownload keeps TilePack
+                // away. Recorded so the entry describes a whole map rather than
+                // half of one.
+                urlTemplate = "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+                // Mapnik's own ceiling in osmdroid. A live-map limit, not a pack one.
+                maxZoom = 19,
+                attribution = "(c) OpenStreetMap contributors",
+                canDownload = false,
+            ),
         )
+
+        const val OSM_STANDARD_KEY = "osm-standard"
+
+        /** The styles a pack can be built from -- for the picker, and for the refusal. */
+        val DOWNLOADABLE: List<TileSource> get() = ALL.filter { it.canDownload }
 
         fun byKey(key: String): TileSource = ALL.firstOrNull { it.key == key } ?: ALL.first()
     }
@@ -77,8 +127,20 @@ data class TilePlan(
     val zoomMax: Int,
     val source: TileSource,
 ) {
-    /** Measured against OpenTopoMap over the reference route: 27-48 KB per tile. */
-    val estimatedBytes: Long get() = tiles.size * 35L * 1024
+    /**
+     * Roughly what the pack will weigh, for saying so before spending it.
+     *
+     * 18 KB a tile, from two measured packs of the reference route: OpenTopoMap
+     * came to 21 KB a tile over z12-16, OpenCycleMap to 15 KB over z12-17. The
+     * earlier 35 KB was taken from shallow tiles alone and overstated a full
+     * pack by more than double -- it predicted 49 MB for a pack that came to 20.
+     *
+     * Deep tiles are what pull the average down: a z17 tile of a field is nearly
+     * empty, and z17 is two thirds of the pack. So this will read high on a
+     * shallow pack and low on a dense city one, which is why it is offered as
+     * "about" and never as a promise.
+     */
+    val estimatedBytes: Long get() = tiles.size * 18L * 1024
 }
 
 data class TileProgress(val done: Int, val total: Int, val unavailable: Int)

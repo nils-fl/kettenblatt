@@ -21,6 +21,16 @@ data class RouteMeta(
     val hasGuidance: Boolean,
     val maneuverCount: Int = 0,
     val tilesFileName: String? = null,
+    /**
+     * Size of that pack on disk.
+     *
+     * Recorded rather than measured on demand: the list draws every card at
+     * once, and a pack is the only thing here big enough to be worth reclaiming,
+     * so the figure has to be on screen without stat-ing files during layout.
+     * Defaulted so older index files load, and refreshed whenever a pack is
+     * written -- a resumed download makes yesterday's number wrong.
+     */
+    val tilesBytes: Long = 0,
     /** Favourites sort to the top of the list. Defaulted so older index files load. */
     val favourite: Boolean = false,
 ) {
@@ -128,7 +138,9 @@ class RouteStore(private val context: Context) {
             File(dir, stored).outputStream().use { input.copyTo(it) }
         } ?: return null
 
-        return index.update(routeId) { it.copy(tilesFileName = stored) }
+        return index.update(routeId) {
+            it.copy(tilesFileName = stored, tilesBytes = File(dir, stored).length())
+        }
     }
 
     fun load(meta: RouteMeta): Route {
@@ -149,8 +161,32 @@ class RouteStore(private val context: Context) {
 
     /** Register a pack built in place by [tilesFileFor]. */
     fun attachTilesFile(routeId: String): RouteMeta? {
-        if (!tilesFileFor(routeId).exists()) return null
-        return index.update(routeId) { it.copy(tilesFileName = "$routeId.mbtiles") }
+        val file = tilesFileFor(routeId)
+        if (!file.exists()) return null
+        return index.update(routeId) {
+            it.copy(tilesFileName = "$routeId.mbtiles", tilesBytes = file.length())
+        }
+    }
+
+    /**
+     * Delete a route's offline pack, keeping the route itself.
+     *
+     * The one thing here worth reclaiming space from, and the one thing that can
+     * always be downloaded again -- which is why removing it is offered at all,
+     * and why it does not ask twice as hard as deleting a route does.
+     */
+    fun removeTiles(routeId: String): RouteMeta? {
+        val meta = find(routeId) ?: return null
+        meta.tilesFileName?.let { File(dir, it).delete() }
+        // Also the by-id path: a sideloaded pack and a downloaded one share it,
+        // and a half-finished download is registered under neither.
+        val pack = tilesFileFor(routeId)
+        pack.delete()
+        // SQLite leaves a rollback journal beside the database. Empty after a
+        // clean close, but a download killed mid-transaction leaves a real one,
+        // and reclaiming space that still leaves a file behind is not reclaiming.
+        File(pack.path + "-journal").delete()
+        return index.update(routeId) { it.copy(tilesFileName = null, tilesBytes = 0) }
     }
 
     /** Forget a route and remove its files, including any tile pack. */
@@ -158,6 +194,7 @@ class RouteStore(private val context: Context) {
         index.remove(id)?.let { removed ->
             File(dir, removed.fileName).delete()
             removed.tilesFileName?.let { File(dir, it).delete() }
+            File(tilesFileFor(id).path + "-journal").delete()
         }
     }
 

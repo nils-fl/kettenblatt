@@ -287,6 +287,15 @@ class FormatTest {
     }
 
     @Test
+    fun `durations under a minute are seconds, not zero minutes`() {
+        // "0m" beside a distance reads as metres, and an arrival summary saying
+        // the rider never moved is worse than one saying they moved for 40 s.
+        assertEquals("40s", formatDuration(40))
+        assertEquals("0s", formatDuration(0))
+        assertEquals("1m", formatDuration(60))
+    }
+
+    @Test
     fun `speed handles the no-fix case`() {
         assertEquals("—", formatSpeed(null))
         assertEquals("18.0 km/h", formatSpeed(5.0))

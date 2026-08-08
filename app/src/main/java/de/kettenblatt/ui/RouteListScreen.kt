@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.History
@@ -71,6 +72,8 @@ fun RouteListScreen(
     error: String?,
     busy: Boolean,
     units: Units,
+    /** Route ids waiting for or undergoing an automatic match. */
+    matching: List<String>,
     onImport: () -> Unit,
     onOpen: (RouteMeta) -> Unit,
     onOpenSettings: () -> Unit,
@@ -79,6 +82,7 @@ fun RouteListScreen(
     onResume: (Ride) -> Unit,
     onDiscardResumable: () -> Unit,
     onAttachTiles: (RouteMeta) -> Unit,
+    onRemoveTiles: (RouteMeta) -> Unit,
     onRename: (RouteMeta, String) -> Unit,
     onToggleFavourite: (RouteMeta) -> Unit,
     onDelete: (RouteMeta) -> Unit,
@@ -86,6 +90,7 @@ fun RouteListScreen(
 ) {
     var pendingDelete by remember { mutableStateOf<RouteMeta?>(null) }
     var pendingRename by remember { mutableStateOf<RouteMeta?>(null) }
+    var pendingTileRemoval by remember { mutableStateOf<RouteMeta?>(null) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -140,8 +145,10 @@ fun RouteListScreen(
                             route = route,
                             enabled = !busy,
                             units = units,
+                            matching = route.id in matching,
                             onOpen = { onOpen(route) },
                             onAttachTiles = { onAttachTiles(route) },
+                            onRemoveTiles = { pendingTileRemoval = route },
                             onRename = { pendingRename = route },
                             onToggleFavourite = { onToggleFavourite(route) },
                             onDelete = { pendingDelete = route },
@@ -177,6 +184,28 @@ fun RouteListScreen(
         )
     }
 
+    pendingTileRemoval?.let { route ->
+        AlertDialog(
+            onDismissRequest = { pendingTileRemoval = null },
+            title = { Text("Remove offline map?") },
+            text = {
+                Text(
+                    "Frees ${formatBytes(route.tilesBytes)}. The route stays, and the " +
+                        "map can be downloaded again — but not without a connection, so " +
+                        "not on the road."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { onRemoveTiles(route); pendingTileRemoval = null }) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingTileRemoval = null }) { Text("Keep") }
+            },
+        )
+    }
+
     pendingRename?.let { route ->
         RenameDialog(
             initial = route.name,
@@ -200,8 +229,10 @@ private fun RouteCard(
     route: RouteMeta,
     enabled: Boolean,
     units: Units,
+    matching: Boolean,
     onOpen: () -> Unit,
     onAttachTiles: () -> Unit,
+    onRemoveTiles: () -> Unit,
     onRename: () -> Unit,
     onToggleFavourite: () -> Unit,
     onDelete: () -> Unit,
@@ -244,6 +275,7 @@ private fun RouteCard(
                     onRename = onRename,
                     onToggleFavourite = onToggleFavourite,
                     onAttachTiles = onAttachTiles,
+                    onRemoveTiles = onRemoveTiles,
                     onDelete = onDelete,
                 )
             }
@@ -258,18 +290,27 @@ private fun RouteCard(
             Spacer(Modifier.height(14.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Whether a route carries guidance is the main thing worth
-                // knowing before setting off, so it is stated rather than implied.
-                if (route.hasGuidance) {
-                    Chip(
+                // What a route carries is the main thing worth knowing before
+                // setting off, so it is stated rather than implied. A route
+                // without cues still navigates -- the line, your position on it
+                // and the off-route alert need none -- so the chip says what it
+                // has rather than what it lacks.
+                when {
+                    matching -> Chip(
+                        text = "Matching…",
+                        background = MaterialTheme.colorScheme.secondaryContainer,
+                        foreground = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+
+                    route.hasGuidance -> Chip(
                         text = "${route.maneuverCount} turns",
                         icon = Icons.Default.Directions,
                         background = MaterialTheme.colorScheme.primaryContainer,
                         foreground = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
-                } else {
-                    Chip(
-                        text = "No turn cues",
+
+                    else -> Chip(
+                        text = "Geometry only",
                         background = MaterialTheme.colorScheme.surfaceVariant,
                         foreground = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -277,7 +318,15 @@ private fun RouteCard(
 
                 if (route.tilesFileName != null) {
                     Chip(
-                        text = "Offline",
+                        // With the size, because a pack is the only thing here
+                        // measured in tens of megabytes and the only reason to
+                        // go looking for something to clear. An older index has
+                        // no figure recorded; the chip says what it knows.
+                        text = if (route.tilesBytes > 0) {
+                            "Offline · ${formatBytes(route.tilesBytes)}"
+                        } else {
+                            "Offline"
+                        },
                         icon = Icons.Default.CloudOff,
                         background = MaterialTheme.colorScheme.tertiaryContainer,
                         foreground = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -342,6 +391,7 @@ private fun RouteMenu(
     onRename: () -> Unit,
     onToggleFavourite: () -> Unit,
     onAttachTiles: () -> Unit,
+    onRemoveTiles: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
@@ -376,6 +426,17 @@ private fun RouteMenu(
                 leadingIcon = { Icon(Icons.Default.CloudOff, contentDescription = null) },
                 onClick = { open = false; onAttachTiles() },
             )
+            // The one thing on the phone big enough to be worth reclaiming, and
+            // the only one that can always be fetched again -- so removing it
+            // sits above the divider, with the ordinary actions rather than
+            // beside deleting the route.
+            if (route.tilesFileName != null) {
+                DropdownMenuItem(
+                    text = { Text("Remove offline map") },
+                    leadingIcon = { Icon(Icons.Default.DeleteSweep, contentDescription = null) },
+                    onClick = { open = false; onRemoveTiles() },
+                )
+            }
             HorizontalDivider()
             DropdownMenuItem(
                 text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
@@ -479,8 +540,8 @@ private fun EmptyState(modifier: Modifier = Modifier) {
             Text("No routes yet", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Import a GPX file. Turn cues, street names and an offline " +
-                    "map are added here, over wifi.",
+                "Import a GPX file. Turn cues and street names are added on " +
+                    "their own over wifi; an offline map is one tap in the preview.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,

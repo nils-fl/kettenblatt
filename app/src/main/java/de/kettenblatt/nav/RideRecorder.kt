@@ -46,13 +46,22 @@ class RideRecorder(
         store.save(ride)
     }
 
+    /**
+     * The ride as it stands, closed off at [endedAtMs], written nowhere.
+     *
+     * For the arrival summary, which is wanted the moment the finish is crossed
+     * -- while the rider may still choose to carry on, so nothing may be
+     * committed yet.
+     */
+    fun snapshot(covered: CoveredSegments, endedAtMs: Long): Ride = ride.copy(
+        trail = ArrayList(trail),
+        coveredRuns = covered.toRuns(),
+        endedAtMs = endedAtMs,
+    )
+
     /** Close the ride and write it into history. */
     fun finish(covered: CoveredSegments, endedAtMs: Long): Ride {
-        ride = ride.copy(
-            trail = ArrayList(trail),
-            coveredRuns = covered.toRuns(),
-            endedAtMs = endedAtMs,
-        )
+        ride = snapshot(covered, endedAtMs)
         store.save(ride)
         return ride
     }

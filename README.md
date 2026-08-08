@@ -33,7 +33,7 @@ planner. Komoot is a trademark of komoot GmbH.
       │   ┌────────────────────────┘
       │   ▼
       ├─► 70 turns, 67 the other way, 82 surface spans  ──►  navigate,
-      └─► Offline map ──► 431 tiles, 9 MB  ─────────────►    entirely offline
+      └─► Offline map ──► 1,425 tiles, 20 MB  ──────────►    entirely offline
 ```
 
 Everything above happens on the phone. There is no desktop step, no Docker, and
@@ -65,19 +65,60 @@ home, over wifi. Nothing about the ride itself touches the network.
 
 ## Preparing a route on the phone
 
-Import a `.gpx` and the preview offers **Add turn cues**. That sends the track to
-Valhalla, maps the returned maneuvers back onto the original geometry, matches the
-reverse direction too, and rewrites the route in place. On the reference route it
-takes about a second and yields the same 70 turns, 67 reverse cues and 82 surface
-spans that the Python pipeline this was ported from produced — verified by
-diffing the two files before that pipeline was retired.
+**You never have to prepare a route to ride it.** A plain GPX navigates on
+geometry alone: the line, your position snapped to it, off-route with a bearing
+back, wrong-direction, the vibration alerts, waypoints, remaining distance,
+ascent, speed, ETA, recording and resume. Nothing on the path from the list to
+*Start ride* has ever checked for turn cues. Matching only *adds* — turn cues
+with street names, surface spans, cues for the other direction, and auto-dim,
+which stays off without cues because nothing would wake the screen.
+
+That being so, it happens **on its own**. Import a `.gpx` over wifi and it is
+matched without being asked, one route at a time; the card shows *Matching…* and
+then the turn count. Switch it off under *Preparing routes* if you would rather
+press the button. It declines silently on mobile data — a few Valhalla calls
+belong on wifi, not on someone's allowance — and never touches a route that
+arrived with cues of its own.
+
+Matching sends the track to Valhalla, maps the returned maneuvers back onto the
+original geometry, matches the reverse direction too, and rewrites the route in
+place. On the reference route it takes about a second and yields the same 70
+turns, 67 reverse cues and 82 surface spans that the Python pipeline this was
+ported from produced — verified by diffing the two files before that pipeline was
+retired.
+
+One consequence worth knowing: rewriting stores the bundle under a **new file
+name and deletes the old one**, so a `RouteMeta` captured before a background
+match points at a file that no longer exists. Both places that could hold a stale
+one — the open preview, and *Start ride* — re-read it.
 
 ![Preparing a route on the phone](docs/screens/prepare-on-phone.png)
 
 **Offline map** does the other half: the tile corridor, downloaded straight into an
-MBTiles pack in the route's own storage. 431 tiles and 9 MB for the reference
-route, in well under a minute. Stopping is safe and starting again resumes, so an
+MBTiles pack in the route's own storage. 1,425 tiles for the reference route at
+the default z12–17. Stopping is safe and starting again resumes, so an
 interrupted download costs only the tiles in flight.
+
+The pack goes to **z17, the deepest level OpenTopoMap renders**, which is what
+keeps Close mode from upscaling. It is most of the cost: z12–16 is 431 tiles,
+and z17 alone adds 994. It is also the first zoom where the corridor is cheaper
+than the bounding box, so the pack finally becomes a strip rather than a
+rectangle. Drop *Deepest zoom* to 16 if you would rather have the smaller file
+and a slightly soft Close mode; the screen says which you are choosing.
+
+Measured, not guessed: the reference route packs to **20 MB in OpenCycleMap at
+z12–17** (15 KB a tile) and **9 MB in OpenTopoMap at z12–16** (21 KB a tile). The
+size shown before a download used to assume 35 KB a tile, which promised 49 MB
+for that 20 MB pack — deep tiles are mostly empty field, and z17 is two thirds
+of the pack. It now assumes 18 KB and is offered as "about", because a single
+figure cannot span styles and zoom ranges any more closely than that.
+
+Each route's card shows what its pack weighs — *Offline · 20 MB* — and the
+card's menu offers to remove it. It is the one thing on the phone big enough to
+be worth reclaiming and the only one that can always be fetched again, which is
+why removing it sits with the ordinary actions rather than beside deleting the
+route. The confirmation says how much it frees, and that you cannot get it back
+without a connection.
 
 Both are best-effort in the way that matters: if the server cannot be reached the
 route still imports and navigates on geometry alone, with the reason shown. And a
@@ -140,11 +181,13 @@ menu.
 - **Stopping asks first.** A stray tap on a bar-mounted phone should not end the
   ride, so the stop button confirms and shows how far is left.
 - **Arriving stops by itself** a minute after the finish, rather than holding the
-  GPS for the rest of the evening.
-- **Screen off drops GPS from 1 s to 4 s** between fixes. Accuracy is deliberately
-  *not* reduced: the tracker discards fixes worse than 30 m, so a balanced-power
-  provider would silently stop navigation in your pocket. The cost is that
-  off-route takes about twelve seconds to notice instead of three.
+  GPS for the rest of the evening. The summary card outlives it — see
+  [Arriving](#arriving).
+- **Screen off stretches the fix interval fourfold**, from 1 s to 4 s by default.
+  Accuracy is deliberately *not* reduced: the tracker discards fixes worse than
+  30 m, so a balanced-power provider would silently stop navigation in your
+  pocket. The cost is that off-route takes about twelve seconds to notice
+  instead of three.
 
 ### Auto screen dim
 
@@ -190,6 +233,32 @@ The same slot warns about **surface changes**, from the spans matching returns
 alongside the cues — *"Compacted — 290 m to go"* — with enough room to pick a
 line or change gear. The preview shows the whole split, and marks ferries.
 
+### Arriving
+
+Crossing the finish replaces the map with a card: a celebration mark, the route
+name, and the four figures worth reading — distance ridden, moving time, ascent
+and average speed — plus how much of the planned route was actually covered. They
+come from the **recorded ride**, not from the plan, so they say what happened
+rather than what was intended; a ride with a shortcut in it says so rather than
+quietly reading as a clean finish.
+
+Two decisions worth knowing:
+
+- **The card outlives the navigation service.** The service stops itself a minute
+  after the finish, and a summary that vanished from under the rider mid-read
+  would be worse than none. So the arrival snapshot lives in
+  `NavigationRepository`, which `stop()` deliberately does not clear — only
+  starting the next ride, or dismissing the card, does. Once the service has gone,
+  *Keep riding* disappears and only *Done* is left, because there is no longer
+  anything to go back to.
+- **The snapshot is cut at the finish line**, not at the auto-stop, so a minute
+  spent standing at the end is not counted as ride time. History shows the ride
+  closed at the real end, which is why its figures can be a few metres and a few
+  seconds larger — that is the last stretch inside the 30 m finish radius.
+
+*Keep riding* exists because a loop passes its own finish, and a rider may simply
+want to carry on past it.
+
 ### Recording, history and export
 
 Every ride is recorded while you navigate: the trail of accepted fixes plus which
@@ -224,8 +293,8 @@ settings. A library of ten prepared routes comes to well under a megabyte, small
 enough to mail to yourself.
 
 Offline map packs are deliberately left out. They are the only thing here that
-can be recreated from nothing, and at ~9 MB per route they would be almost the
-entire file.
+can be recreated from nothing, and at 20 MB or so per route they would be almost
+the entire file.
 
 **Restore** merges: it adds what is missing and never touches a route you already
 have, so running it twice is harmless and importing somebody else's library
@@ -238,15 +307,38 @@ download it again from the preview.
 ## Settings
 
 The gear in the route list covers units (kilometres or miles, applied everywhere
-including speed and ascent), the two off-route thresholds, keep-screen-on, the
-auto-dim delay and wake distance, the two navigation zoom levels, the Valhalla
-server used for matching, and the tile source, deepest zoom and corridor width
-used for offline packs. Every value
-has a sane default, and *Reset* returns to them.
+including speed and ascent), the two off-route thresholds, how often the position
+is checked, keep-screen-on, the auto-dim delay and wake distance, the map style,
+the two navigation zoom levels, whether new routes are matched automatically, the
+Valhalla server used for matching, and the deepest zoom and corridor width used
+for offline packs. Every value has a sane default, and *Reset* returns to them.
+
+Changing a default only reaches fresh installs: `SettingsStore` writes every key
+whenever any one changes, so anyone who has touched a setting has the old values
+stored. *Reset to defaults* is how an existing install picks up the z17 pack
+depth and the z17 Close mode. Nothing is migrated silently — tripling someone's
+next download for a value they may have chosen deliberately is the one thing a
+settings screen must not do. Instead the screen says what the current value
+costs: set Close past what the style renders and it tells you it is upscaling;
+set the pack shallower than the style's maximum and it tells you Close will be
+soft.
+
+Map attribution is shown at the foot of the *Map style* section, and changes with
+the style. OpenTopoMap's styling is CC-BY-SA and Thunderforest requires
+attribution; the string was already stored in every pack's metadata and shown to
+nobody.
 
 The off-route sliders refuse an inverted pair — clearing further out than the
 alert triggers would make the alert flap continuously, so the setting cannot be
 saved that way in the first place.
+
+**Position updates** is a battery setting, not a smoothness one, and the screen
+says so: the map eases between fixes whichever interval you pick, and asking for
+more than one a second buys nothing because a GNSS chip produces one a second and
+repeats itself when pushed. What a longer interval does cost is reaction time, so
+above the 1 s default the section spells that out — at 3 s the off-route alert
+needs about nine seconds to fire rather than three, because it waits for three
+fixes to agree.
 
 ## Look and feel
 
@@ -272,11 +364,13 @@ and the dense grey of a town centre.
 cross-hatch**, which reads as a broken image. Some blank is unavoidable: an
 offline pack covers the route corridor, while the preview card is landscape and
 a route often is not. The reference route is 5.3 km across in a card 11.3 km
-wide, so nearly 3 km either side is legitimately empty — covering it would take
-the pack from 431 tiles to about 900, and 9 MB to 19 MB, for ground nobody rides
-through. Cheaper and more honest to make empty look deliberate. The colour is
-keyed to the tiles rather than the theme, because the raster map is light in dark
-mode too, and a dark fill would read as a hole punched in the map.
+wide, so nearly 3 km either side is legitimately empty — covering it would roughly
+double the pack, for ground nobody rides through. Cheaper and more honest to make
+empty look deliberate. The colour is keyed to the tiles rather than the theme,
+because the raster map is light in dark mode too, and a dark fill would read as a
+hole punched in the map. One constant serves all four styles: they render on
+warm off-whites within a few units of each other, and the fill only ever shows at
+the edge of coverage.
 
 **Arrowheads along the line say which way round you ride.** Two dots at the ends
 cannot: on a loop they sit within a few metres of each other, so the map looked
@@ -331,8 +425,62 @@ rotation too, so follow mode is driven from touch instead.
 
 Close mode is allowed **one zoom level beyond** an offline pack's maximum: a
 single upscale is still readable, and being able to zoom in at a junction is
-worth more than perfect sharpness. Raise *Deepest zoom* in Settings before
-downloading to avoid even that.
+worth more than perfect sharpness. With the defaults it never has to — the pack
+reaches z17 and Close sits at z17 — so the allowance only bites on a shallower
+sideloaded pack.
+
+**Close is z17, not z18, and that is deliberate.** z18 asked OpenTopoMap for a
+level it does not have, so the map upscaled z17 and the dark building outlines
+that style draws came out thick and blocky — which is most of what "the offline
+map looks cluttered" turns out to mean. A sharp 800 m view beats a blurry 400 m
+one. The slider still reaches z19 for styles that render deeper, and pinch zoom
+was never limited.
+
+## One map style, for planning and for riding
+
+The live map and the downloaded pack used to be **different maps**: the live one
+was hardcoded to OSM Standard, while packs were built from whatever *Offline
+maps* said, which defaulted to OpenTopoMap. So you planned a junction on one
+rendering and met it on another, and there was no setting that could make them
+agree.
+
+There is now one **Map style**, applying to both. Four to choose from:
+
+| | Style | Downloadable | Deepest |
+|---|---|---|---|
+| **Topo** | OpenTopoMap — contours, hillshade, dark building outlines | yes, no key | z17 |
+| **Outdoors** | Thunderforest Outdoors — calmer in towns | yes, free key | z22 |
+| **Cycle** | Thunderforest OpenCycleMap — names the cycle network you ride by | yes, free key | z22 |
+| **Standard** | the familiar OSM rendering; softest in a town centre | **no** | z19 |
+
+**OSM Standard cannot be packed**, and that is a licence rather than a
+limitation: the OSM Foundation's tile policy forbids bulk download, and osmdroid
+enforces it with `FLAG_NO_BULK`. It is listed anyway, because a style list that
+omits the map everyone already knows leaves you wondering what you are looking
+at. Choose it and the *Offline map* button greys out with the reason and the
+alternatives beside it.
+
+CyclOSM was considered as a keyless middle ground and rejected: OSM-France serve
+it under fair use and cache tiles for hours, so building a permanent pack from it
+would be against the spirit of their policy. Of the four, only Thunderforest
+explicitly permits caching, which is why the two keyed styles are there at all.
+
+**For a bike, OpenCycleMap is the one to want.** Compared at the same junction in
+Venlo at z17: OpenTopoMap fills the frame with near-black building outlines and
+buries the street names under them; Outdoors renders buildings flat and pale and
+is easy to read; OpenCycleMap does that *and* draws the cycle network — the Dutch
+`LF`, `F` and node routes as coloured ribbons, cycle paths dashed — which on a
+route like this is the thing you are actually navigating by. It is not the
+default only because it needs a key, and a default that renders nothing until you
+sign up is worse than one that works.
+
+Live tiles for a templated style go through a small `OnlineTileSourceBase` that
+delegates to the same `TileSource.url` the downloader uses, so the map and the
+pack fetch byte-identical URLs. osmdroid's `XYTileSource` cannot: it builds
+`baseUrl + z/x/y + extension`, with nowhere for a `?apikey=` or a `{s}` inside
+the host. The source name handed to osmdroid is the style key, because its disk
+cache is one table keyed by `(tile, provider)` — two styles sharing a name would
+serve each other's tiles.
 
 Course-up uses the bearing of the route **60 m ahead** rather than the current
 segment or GPS course. Segments average 29 m on the reference route, so a
@@ -342,8 +490,40 @@ walking pace.
 **One consequence of raster tiles:** rotating the map rotates the pre-rendered
 street labels with it, so heading south they read upside-down. Nothing can fix
 that short of vector tiles. If you would rather have permanently readable labels
-and orient yourself mentally, drop the `pointUp` call in `RouteMapView.kt` and
-navigation mode becomes zoomed-in north-up.
+and orient yourself mentally, drop the `setMapOrientation` call in
+`SmoothCamera.applyTo` and navigation mode becomes zoomed-in north-up.
+
+### Why the map glides rather than steps
+
+Fixes land once a second, and something has to cover the second in between. Two
+things used to make that abrupt, and both were the map's fault rather than the
+GPS's:
+
+- The camera and the chevron were placed on the **nearest track point**, so they
+  sat still and then lurched a whole segment — 29 m on the reference route.
+- Rotation was applied **outright** once the heading had drifted 3°, because
+  without a deadband every fix nudged it a fraction of a degree and the map
+  shimmered. On a course-up map that reads as a twitch a second.
+
+Both are now driven frame by frame by `SmoothCamera`, which closes a fixed
+fraction of the remaining gap each frame — exponential, so the step is
+proportional to what is left, and derived from elapsed time rather than counted
+frames so a dropped one is harmless. The tracker publishes the position
+**interpolated along the segment** instead of rounded to a track point, so there
+is a continuous target to aim at in the first place.
+
+Camera and chevron run on the same clock deliberately: move one without the
+other and the marker slides around the screen while the map catches up behind it.
+
+The lag traded for this is about 0.45 s of travel — some 2 m at 20 km/h, well
+inside GPS error. There is no animation to start, finish or collide with: the
+next fix simply replaces the target, and the glide continues from wherever it had
+reached. Standing still, it settles within a second and stops asking for frames.
+
+**It stops while the screen is dimmed.** Easing a camera under a black overlay
+redraws the whole map sixty times a second for nobody, which is exactly the power
+auto-dim exists to save, so `AutoDim` hands its state down and following pauses.
+Waking arrives at the rider rather than gliding to catch up.
 
 ## Building it
 
@@ -356,6 +536,9 @@ Kettenblatt appears in the share sheet and as a handler for `.gpx`, `.navi.json`
 and `.mbtiles`, so a route or a map pack can also be shared in from elsewhere.
 
 ## Releases
+
+Two channels: tagged releases, and a rolling [nightly](#nightlies) off `main` for
+anyone who wants to try what is coming.
 
 Tagging is the whole process:
 
@@ -376,6 +559,36 @@ reflectively, and keeps the generated `kotlinx.serialization` serializers, which
 are looked up by name. Anything else stripped in error surfaces only at runtime,
 so a release build is worth installing and exercising before tagging — import,
 prepare, ride, stop, history.
+
+### Nightlies
+
+Every push to `main` builds and publishes a **pre-release tagged `nightly`**, so
+anyone who wants to try what is coming can, without it ever being mistaken for a
+release. There is only ever one — the tag moves with each build, because a list
+of nightlies is a list of things nobody should install and only the newest is
+worth having.
+
+It is marked pre-release on GitHub, and the notes say plainly that it has passed
+the unit tests and nothing else.
+
+**A nightly installs beside a release, not over it.** It takes its own
+applicationId (`de.kettenblatt.nightly`) and calls itself *Kettenblatt Nightly*
+on the launcher, so nothing about trying one can disturb the version you rely on.
+The trade is that Android treats them as two apps: separate route libraries and
+ride histories, and routes do not carry across. Export a backup from one and
+restore it into the other if you want them in both.
+
+`versionName` is `nightly-yyMMddHH-<sha>` and `versionCode` is that same
+`yyMMddHH` — monotonic without any stored counter, so a rebuild an hour later
+always supersedes, and both answer the only useful question about a nightly,
+which is *which one is this*. The codes sit far above any release code, which is
+harmless precisely because the two channels are different applications and never
+compare.
+
+Nightlies are signed with the same key as releases. They have to be: a nightly
+must be able to upgrade the nightly already on someone's phone. The workflow
+refuses to publish an unsigned APK, and skips entirely on a fork, where the
+signing secrets do not exist.
 
 ### One-time signing setup
 
@@ -425,7 +638,7 @@ unsigned APK, so a clone can be built by anyone.
 ## Tests
 
 ```sh
-./gradlew :app:testDebugUnitTest    # 173 tests
+./gradlew :app:testDebugUnitTest    # 205 tests
 ```
 
 They run against the real reference route rather than synthetic data.
@@ -453,6 +666,13 @@ and an unpaved span for their chips, killing the app mid-ride and resuming it,
 exporting a ride and importing the result back as a route, downloading an offline
 pack and rendering from it in **airplane mode**, and preparing a 7,209-point
 recording to exercise trace thinning.
+
+Camera smoothness was checked the same way, since no unit test can see it: a
+screen recording of a simulated ride, phase-correlated frame to frame. The map
+moves less than a pixel per frame at 20 km/h — 84% of frames identical, the rest
+a single pixel, never more than 2.2 px — which is the signature of motion limited
+only by the pixel grid. A lurch to the next track point would be some 50 px, and
+a 3° rotation snap displaces the screen edge by about 28.
 
 The strongest check: the bundle the phone produced was pulled off the device and
 diffed against the one the Python pipeline wrote from the same GPX. Identical
@@ -506,7 +726,11 @@ therefore does not use `CacheManager` at all: it fetches from a source that
 permits caching and writes the MBTiles itself.
 
 **MBTiles carries no tile-source name**, so `IArchiveFile.getTileSources()` returns
-an empty set and the name has to be supplied in code.
+an empty set and the name has to be supplied in code. It also has to stay
+distinct from every style key: osmdroid's disk cache is one table keyed by
+`(tile, provider)` where provider is the source name, so a pack sharing a
+namespace with an online cache is how a pack starts serving tiles it does not
+contain.
 
 **Zooming past a tile pack's maximum does not fall back to the network.** osmdroid
 upscales the deepest tile it has and the map turns to mush, so navigation zoom is

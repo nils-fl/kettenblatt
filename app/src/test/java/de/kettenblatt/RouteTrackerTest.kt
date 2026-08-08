@@ -93,6 +93,55 @@ class RouteTrackerTest {
         assertTrue(states.last().progress > 0.99)
     }
 
+    // --- position for the map ---------------------------------------------
+
+    @Test
+    fun `the reported position moves along the segment, not from point to point`() {
+        // The chevron and the camera are placed from this, so a position rounded
+        // to the nearest track point makes both of them jump a segment at a time
+        // -- 29 m on the real route, 10 m here.
+        val route = straightRoute()
+        val tracker = RouteTracker(route)
+        val first = route.points[0]
+        val second = route.points[1]
+
+        val alongSegment = listOf(0.1, 0.3, 0.5, 0.7, 0.9).mapIndexed { i, t ->
+            val state = requireNotNull(
+                tracker.update(
+                    lat = first.lat + t * (second.lat - first.lat),
+                    lon = first.lon + t * (second.lon - first.lon),
+                    accuracyM = 5.0,
+                    speedMps = 2.0,
+                    timeMs = 1_000_000L + i * 1_000L,
+                )
+            )
+            Geo.haversine(first.lat, first.lon, state.snappedLat, state.snappedLon)
+        }
+
+        // Two metres per step, all of it within the first segment.
+        alongSegment.zipWithNext().forEach { (a, b) ->
+            assertTrue("stepped $a -> $b", b - a in 1.5..2.5)
+        }
+        assertEquals(9.0, alongSegment.last(), 0.5)
+    }
+
+    @Test
+    fun `the reported position stays on the route when the fix is off it`() {
+        // It is the snapped point, not the raw fix: the chevron belongs on the
+        // line, with the distance from it reported separately.
+        val route = straightRoute()
+        val point = route.points[10]
+        val state = requireNotNull(
+            // Roughly 20 m north of a track that runs due west to east.
+            RouteTracker(route).update(point.lat + 0.00018, point.lon, 5.0, 5.0, 1_000_000L)
+        )
+
+        assertTrue(state.crossTrackM > 15.0)
+        // The whole track sits on one parallel, so any drift off it is drift off
+        // the route.
+        assertEquals(51.0, state.snappedLat, 1e-9)
+    }
+
     // --- the overlapping-loop problem ------------------------------------
 
     @Test
@@ -934,7 +983,8 @@ class RouteTrackerTest {
         wrongDirection: Boolean = false,
         finished: Boolean = false,
     ) = NavState(
-        snappedIndex = 0, crossTrackM = 0.0, distanceAlongM = 0.0,
+        snappedIndex = 0, snappedLat = 51.0, snappedLon = 6.0,
+        crossTrackM = 0.0, distanceAlongM = 0.0,
         distanceRemainingM = 1000.0, ascentRemainingM = 0.0, progress = 0.0,
         offRoute = offRoute, bearingToRouteDeg = null, nextManeuver = null,
         distanceToManeuverM = maneuverAhead,

@@ -64,7 +64,13 @@ fun formatShortDistance(metres: Double, units: Units = Units.METRIC): String = w
 fun formatDuration(seconds: Long): String {
     val h = seconds / 3600
     val m = (seconds % 3600) / 60
-    return if (h > 0) "${h}h ${m}m" else "${m}m"
+    return when {
+        h > 0 -> "${h}h ${m}m"
+        m > 0 -> "${m}m"
+        // Seconds rather than "0m", which beside a distance reads as metres --
+        // an arrival summary saying "RIDDEN 140 m / MOVING 0m" is unparseable.
+        else -> "${seconds}s"
+    }
 }
 
 fun formatSpeed(mps: Double?, units: Units = Units.METRIC): String = when {

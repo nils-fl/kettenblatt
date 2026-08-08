@@ -30,6 +30,7 @@ import de.kettenblatt.data.Route
 import de.kettenblatt.prep.PrepStage
 import de.kettenblatt.ui.theme.accents
 import de.kettenblatt.prep.TileProgress
+import de.kettenblatt.prep.TileSource
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -56,6 +57,7 @@ data class PrepState(
 fun PreparationCard(
     route: Route,
     offlineTiles: File?,
+    style: TileSource,
     prep: PrepState,
     onPrepare: () -> Unit,
     onDownloadTiles: () -> Unit,
@@ -69,7 +71,18 @@ fun PreparationCard(
         when {
             prep.tiles != null -> TileProgressRow(prep.tiles, onCancel)
             prep.stage != null -> MatchingRow(prep.stage)
-            else -> Actions(route, offlineTiles, prep, onPrepare, onDownloadTiles)
+            else -> Actions(route, offlineTiles, style, prep, onPrepare, onDownloadTiles)
+        }
+
+        // Outside the when, so what a download will cost is still on screen
+        // while it runs -- which is the half of the ride it actually matters in.
+        prep.tilePlanSummary?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         prep.done?.let { message ->
@@ -111,6 +124,7 @@ fun PreparationCard(
 private fun Actions(
     route: Route,
     offlineTiles: File?,
+    style: TileSource,
     prep: PrepState,
     onPrepare: () -> Unit,
     onDownloadTiles: () -> Unit,
@@ -119,9 +133,14 @@ private fun Actions(
         if (route.hasGuidance) {
             "This route has turn cues and street names."
         } else {
-            "Geometry only. Matching it against OpenStreetMap adds turn cues, " +
-                "street names and surface — over wifi now, so the ride itself " +
-                "needs no connection."
+            // Leads with what the route already does. The old copy opened with
+            // "Geometry only", which read as a deficiency to be fixed before
+            // setting off -- and nothing here has ever blocked a ride.
+            "Ready to ride as it stands — the line, your position on it and the " +
+                "off-route alert need no cues. Matching against OpenStreetMap " +
+                "adds what geometry cannot carry: turn cues with street names, " +
+                "surface, and cues for the other direction. Over wifi now, so " +
+                "the ride itself still needs no connection."
         },
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -143,17 +162,22 @@ private fun Actions(
             }
         }
 
-        OutlinedButton(onClick = onDownloadTiles, enabled = !prep.busy) {
+        OutlinedButton(onClick = onDownloadTiles, enabled = !prep.busy && style.canDownload) {
             Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text(if (offlineTiles == null) "Offline map" else "Update map")
         }
     }
 
-    prep.tilePlanSummary?.let {
+    // Beside the disabled control rather than in a strip to dismiss: a button
+    // that can only fail is a trap, and the next question -- then which style
+    // can? -- is answered better here than anywhere else.
+    if (!style.canDownload) {
         Spacer(Modifier.height(8.dp))
         Text(
-            it,
+            "${style.name} is online only — the OpenStreetMap tile policy forbids " +
+                "bulk download. Choose ${TileSource.DOWNLOADABLE.joinToString(", ") { it.name }} " +
+                "under Map style in Settings to build a pack.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

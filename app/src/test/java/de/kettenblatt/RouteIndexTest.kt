@@ -30,6 +30,7 @@ class RouteIndexTest {
         importedAtMs: Long = 1_000,
         favourite: Boolean = false,
         tiles: String? = null,
+        tilesBytes: Long = 0,
     ) = RouteMeta(
         id = id,
         name = name,
@@ -40,6 +41,7 @@ class RouteIndexTest {
         hasGuidance = true,
         maneuverCount = 5,
         tilesFileName = tiles,
+        tilesBytes = tilesBytes,
         favourite = favourite,
     )
 
@@ -157,6 +159,32 @@ class RouteIndexTest {
         assertEquals("a.navi.json", removed?.fileName)
         assertEquals("a.mbtiles", removed?.tilesFileName)
         assertTrue(i.list().isEmpty())
+    }
+
+    // --- offline pack size ------------------------------------------------
+
+    @Test
+    fun `a pack size survives a reload`() {
+        index().add(meta("a", tiles = "a.mbtiles", tilesBytes = 31_457_280))
+        assertEquals(31_457_280L, index().find("a")?.tilesBytes)
+    }
+
+    @Test
+    fun `an index written before pack sizes existed still loads`() {
+        // The figure is what the list shows to decide whether to clear anything,
+        // so a missing one has to read as "unknown" rather than stop the app
+        // opening. Written by hand because the point is an older file shape.
+        File(temp.root, "index.json").writeText(
+            """
+            {"routes":[{"id":"a","name":"Venlo loop","fileName":"a.navi.json",
+            "importedAtMs":1000,"distanceM":1000.0,"ascentM":10.0,
+            "hasGuidance":true,"maneuverCount":5,"tilesFileName":"a.mbtiles"}]}
+            """.trimIndent()
+        )
+
+        val loaded = index().find("a")
+        assertEquals("a.mbtiles", loaded?.tilesFileName)
+        assertEquals(0L, loaded?.tilesBytes)
     }
 
     @Test

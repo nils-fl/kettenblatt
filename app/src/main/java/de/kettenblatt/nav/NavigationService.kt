@@ -24,6 +24,7 @@ import de.kettenblatt.R
 import de.kettenblatt.data.Ride
 import de.kettenblatt.data.RideStore
 import de.kettenblatt.data.Route
+import de.kettenblatt.data.SettingsStore
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -46,6 +47,8 @@ class NavigationService : Service() {
 
     private val client by lazy { LocationServices.getFusedLocationProviderClient(this) }
     private lateinit var alerts: Alerts
+    private lateinit var settings: SettingsStore
+    private var screenOn = true
     private var tracker: RouteTracker? = null
     private var lastNotificationMs = 0L
     private var arrived = false
@@ -67,8 +70,8 @@ class NavigationService : Service() {
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                Intent.ACTION_SCREEN_OFF -> requestUpdates(SCREEN_OFF_INTERVAL_MS)
-                Intent.ACTION_SCREEN_ON -> requestUpdates(SCREEN_ON_INTERVAL_MS)
+                Intent.ACTION_SCREEN_OFF -> { screenOn = false; requestUpdates() }
+                Intent.ACTION_SCREEN_ON -> { screenOn = true; requestUpdates() }
             }
         }
     }
@@ -85,6 +88,7 @@ class NavigationService : Service() {
     override fun onCreate() {
         super.onCreate()
         alerts = Alerts(this)
+        settings = SettingsStore(this)
         createChannel()
         registerReceiver(
             screenReceiver,
@@ -121,7 +125,7 @@ class NavigationService : Service() {
         tracker = trackerFor(route, resumed)
         trackedRoute = route
         arrived = false
-        requestUpdates(SCREEN_ON_INTERVAL_MS)
+        requestUpdates()
 
         // Reversing the route mid-ride replaces it in the repository; the tracker
         // has to be rebuilt or every index it holds refers to the old ordering.
@@ -160,7 +164,16 @@ class NavigationService : Service() {
         super.onDestroy()
     }
 
-    private fun requestUpdates(intervalMs: Long) {
+    /**
+     * Ask for fixes at the rider's chosen rate, stretched while the screen is dark.
+     *
+     * Read from the store at each call rather than held: the only things that
+     * change it are the settings screen, which is unreachable mid-ride, and a
+     * restored backup, which is not.
+     */
+    private fun requestUpdates() {
+        val chosen = settings.current.fixIntervalMs
+        val intervalMs = if (screenOn) chosen else chosen * SCREEN_OFF_MULTIPLIER
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMs)
             .setMinUpdateIntervalMillis(intervalMs)
             .setWaitForAccurateLocation(false)
@@ -200,6 +213,12 @@ class NavigationService : Service() {
             arrived = true
             lastNotificationMs = 0L
             maybeUpdateNotification(state)
+            // Built here, while the recorder still holds the trail, and cut off
+            // at the finish line rather than at the auto-stop -- a minute spent
+            // standing at the end is not part of the ride the rider just did.
+            recorder?.let {
+                NavigationRepository.arrive(it.snapshot(state.covered, System.currentTimeMillis()))
+            }
             handler.postDelayed(autoStop, AUTO_STOP_DELAY_MS)
         }
     }
@@ -266,6 +285,13 @@ class NavigationService : Service() {
 
     private fun trackerFor(route: Route, recorder: RideRecorder) = RouteTracker(
         route,
+        offRouteEnterM = settings.current.offRouteEnterM,
+        offRouteExitM = settings.current.offRouteExitM,
+        // The distance that skips the debounce has to scale with the alert
+        // threshold. Left at its fixed 60 m, a rider who widened the alert to
+        // 100 m would still be flagged instantly at 60 -- the setting would
+        // appear to do nothing.
+        offRouteImmediateM = settings.current.offRouteEnterM * IMMEDIATE_OFF_ROUTE_FACTOR,
         initialCoverage = CoveredSegments.fromRuns(
             recorder.restoredRuns,
             maxOf(0, route.points.size - 1),
@@ -303,8 +329,12 @@ class NavigationService : Service() {
         const val ACTION_STOP = "de.kettenblatt.STOP"
         private const val CHANNEL_ID = "navigation"
         private const val NOTIFICATION_ID = 1
-        private const val SCREEN_ON_INTERVAL_MS = 1_000L
-        private const val SCREEN_OFF_INTERVAL_MS = 4_000L
+        /** How much further apart fixes are spaced with the screen dark. */
+        private const val SCREEN_OFF_MULTIPLIER = 4L
+
+        /** Matches RouteTracker's own 40 m / 60 m defaults at the default setting. */
+        private const val IMMEDIATE_OFF_ROUTE_FACTOR = 1.5
+
         private const val NOTIFICATION_INTERVAL_MS = 5_000L
         private const val AUTO_STOP_DELAY_MS = 60_000L
 

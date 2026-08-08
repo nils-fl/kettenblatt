@@ -38,8 +38,66 @@ class SettingsTest {
             navigationZoom = 15.0,
             closeZoom = 19.0,
             keepScreenOn = false,
+            fixIntervalMs = 3_000,
+            valhallaUrl = "https://valhalla.example/route",
+            tileSource = "thunderforest-outdoors",
+            tileZoomMin = 11,
+            tileZoomMax = 18,
+            tileBufferM = 900.0,
+            thunderforestKey = "abc123",
+            autoMatchOnImport = false,
         )
         assertEquals(custom, roundTrip(custom))
+    }
+
+    // --- defaults tied to the data, not to literals -----------------------
+
+    @Test
+    fun `a pack goes as deep as the chosen style renders`() {
+        // Stopping one level short is what made Close mode upscale, which on a
+        // style that outlines every building reads as a broken map. Asserted
+        // against the style rather than against 17, so if OpenTopoMap's ceiling
+        // ever moves this names the value that has to move with it.
+        assertEquals(Settings().mapStyle.maxZoom, Settings().tileZoomMax)
+    }
+
+    @Test
+    fun `close mode never asks for more than the style renders`() {
+        assertTrue(Settings().closeZoom <= Settings().mapStyle.maxZoom.toDouble())
+        assertTrue(Settings().navigationZoom <= Settings().closeZoom)
+    }
+
+    @Test
+    fun `auto-matching is on out of the box`() {
+        // Recorded as a decision rather than left to whoever reads the default:
+        // an existing install has no such key, so it decodes to on and gets the
+        // new behaviour on upgrade.
+        assertTrue(Settings().autoMatchOnImport)
+        assertTrue(SettingsCodec.decode { null }.autoMatchOnImport)
+    }
+
+    @Test
+    fun `an unreadable auto-match flag falls back to on`() {
+        val stored = mapOf(SettingsCodec.AUTO_MATCH to "perhaps")
+        assertTrue(SettingsCodec.decode { stored[it] }.autoMatchOnImport)
+    }
+
+    @Test
+    fun `the default style can be packed`() {
+        // The app is offline-first; a default that cannot be downloaded would
+        // leave the Offline map button disabled out of the box.
+        assertTrue(Settings().mapStyle.canDownload)
+    }
+
+    @Test
+    fun `an out-of-range position interval is clamped, not discarded`() {
+        // Both ends are real settings a backup could carry from a future build,
+        // and the direction the rider wanted is still worth honouring.
+        val tooFast = SettingsCodec.decode { mapOf(SettingsCodec.FIX_INTERVAL to "0")[it] }
+        assertEquals(Settings.FIX_INTERVAL_MS.first, tooFast.fixIntervalMs)
+
+        val tooSlow = SettingsCodec.decode { mapOf(SettingsCodec.FIX_INTERVAL to "60000")[it] }
+        assertEquals(Settings.FIX_INTERVAL_MS.last, tooSlow.fixIntervalMs)
     }
 
     @Test

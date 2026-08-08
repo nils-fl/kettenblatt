@@ -103,15 +103,23 @@ fun NavigationScreen(
         idleBeforeDimMs = settings.autoDimDelayMs,
         wakeAheadM = settings.autoDimWakeAheadM,
         suppressed = confirmingStop || confirmingReverse,
-    ) {
+    ) { dimmed ->
     Box(modifier.fillMaxSize()) {
         RouteMapView(
             route = route,
             state = state,
             mode = mode,
-            follow = !panned,
+            // Following is dropped while dimmed: easing the camera under a black
+            // overlay redraws the whole map sixty times a second for nobody. It
+            // resumes on the tap that wakes the screen, arriving at the rider
+            // rather than gliding to catch up.
+            follow = !panned && !dimmed,
             offlineTiles = offlineTiles,
+            style = settings.mapStyle,
+            styleApiKey = settings.tileApiKey,
             onUserPan = { panned = true },
+            navigationZoom = settings.navigationZoom,
+            closeZoom = settings.closeZoom,
             modifier = Modifier.fillMaxSize(),
         )
 

@@ -64,8 +64,11 @@ fun NavState?.needsAttention(wakeAheadM: Double = ScreenDim.WAKE_AHEAD_M): Boole
 /**
  * Blacks out [content] once the ride has been uneventful for a while.
  *
- * Returns nothing: the dim state is internal, because everything that should
- * cancel it is either derived from [state] or is a tap on the overlay itself.
+ * The dim state is handed to [content] rather than returned. Nothing outside can
+ * usefully *set* it -- everything that clears it is either derived from [state]
+ * or is a tap on the overlay -- but the map underneath has to know, because
+ * gliding a camera nobody can see costs a full redraw per frame, which is
+ * exactly the power this exists to save.
  */
 @Composable
 fun AutoDim(
@@ -81,7 +84,7 @@ fun AutoDim(
      * answer the rider has to give.
      */
     suppressed: Boolean = false,
-    content: @Composable () -> Unit,
+    content: @Composable (dimmed: Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     var dimmed by remember { mutableStateOf(false) }
@@ -113,7 +116,7 @@ fun AutoDim(
     }
 
     Box(Modifier.fillMaxSize()) {
-        content()
+        content(dimmed)
 
         // A plain conditional, not AnimatedVisibility: its exit transition keeps
         // the overlay composed and on top of the controls for the length of the

@@ -51,6 +51,10 @@ fun SettingsScreen(
     onReset: () -> Unit,
     onBack: () -> Unit,
 ) {
+    // Four sections ask what the chosen style can do; resolving once keeps them
+    // answering the same question.
+    val source = settings.mapStyle
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -114,6 +118,37 @@ fun SettingsScreen(
             }
 
             item {
+                Section("Position updates") {
+                    Explanation(
+                        "How often the phone asks the GPS where you are. The map eases " +
+                            "between fixes either way, so a longer interval buys battery " +
+                            "rather than costing smoothness — and a shorter one buys nothing, " +
+                            "since a GNSS chip produces a fix a second and repeats itself if " +
+                            "asked more often. With the screen dark it is stretched four " +
+                            "times further again."
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    ValueSlider(
+                        label = "Check position every",
+                        display = "${settings.fixIntervalMs / 1000} s",
+                        value = (settings.fixIntervalMs / 1000).toFloat(),
+                        range = (Settings.FIX_INTERVAL_MS.first / 1000).toFloat()..
+                            (Settings.FIX_INTERVAL_MS.last / 1000).toFloat(),
+                    ) { v -> onChange { it.copy(fixIntervalMs = v.roundToInt() * 1000L) } }
+
+                    // What it actually costs, in the terms the rider will feel it.
+                    if (settings.fixIntervalMs > Settings().fixIntervalMs) {
+                        Explanation(
+                            "The off-route alert waits for three fixes to agree, so at " +
+                                "${settings.fixIntervalMs / 1000} s it needs about " +
+                                "${3 * settings.fixIntervalMs / 1000} seconds to notice " +
+                                "instead of three."
+                        )
+                    }
+                }
+            }
+
+            item {
                 Section("Screen") {
                     SwitchRow(
                         label = "Keep screen on while riding",
@@ -147,6 +182,68 @@ fun SettingsScreen(
             }
 
             item {
+                Section("Map style") {
+                    Explanation(
+                        "One choice for both the map you plan on and the map a pack is " +
+                            "built from. Planning a junction on one rendering and meeting " +
+                            "it on another is how a turn stops looking familiar."
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        TileSource.ALL.forEachIndexed { i, s ->
+                            SegmentedButton(
+                                selected = settings.tileSource == s.key,
+                                onClick = { onChange { it.copy(tileSource = s.key) } },
+                                shape = SegmentedButtonDefaults.itemShape(i, TileSource.ALL.size),
+                            ) {
+                                Text(s.shortName, maxLines = 1)
+                            }
+                        }
+                    }
+
+                    if (source.needsKey) {
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = settings.thunderforestKey,
+                            onValueChange = { v -> onChange { it.copy(thunderforestKey = v.trim()) } },
+                            label = { Text("Thunderforest API key") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (settings.thunderforestKey.isBlank()) {
+                            Spacer(Modifier.height(6.dp))
+                            Explanation(
+                                "Without a key these tiles come back as an error image, " +
+                                    "which draws as a uniformly grey map — so the live map " +
+                                    "falls back to OSM Standard until one is entered. The " +
+                                    "free tier at thunderforest.com permits caching, which " +
+                                    "is what makes it packable at all."
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+                    if (!source.canDownload) {
+                        Explanation(
+                            "Online only — the OpenStreetMap tile policy forbids bulk " +
+                                "download, so this style cannot be packed. It is the " +
+                                "calmest of these in a town centre, which is the trade."
+                        )
+                    } else {
+                        Explanation(
+                            "Packs already downloaded are untouched by this. Updating one " +
+                                "after changing style rebuilds it from scratch, because two " +
+                                "renderings mixed into one file give a map that changes " +
+                                "appearance as you ride across it."
+                        )
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+                    Explanation(source.attribution)
+                }
+            }
+
+            item {
                 Section("Map zoom") {
                     Explanation(
                         "How close the two following modes sit. A sideloaded tile pack " +
@@ -165,6 +262,18 @@ fun SettingsScreen(
                         value = settings.closeZoom.toFloat(),
                         range = 15f..19f,
                     ) { v -> onChange { it.copy(closeZoom = v.roundToInt().toDouble()) } }
+
+                    // Asking for more than the style renders does not fail, it
+                    // upscales -- which looks like a broken map rather than like
+                    // a setting pushed past its limit.
+                    if (settings.closeZoom > source.maxZoom) {
+                        Explanation(
+                            "z${settings.closeZoom.roundToInt()} is past ${source.name}'s " +
+                                "deepest level, so Close mode upscales z${source.maxZoom} " +
+                                "rather than showing more. Set Close to z${source.maxZoom}, " +
+                                "or pick a style that renders deeper."
+                        )
+                    }
                 }
             }
 
@@ -174,6 +283,16 @@ fun SettingsScreen(
                         "Turn cues come from map-matching a route against OpenStreetMap. " +
                             "That needs a Valhalla server, and happens once per route over " +
                             "wifi — never while riding."
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    SwitchRow(
+                        label = "Match new routes automatically",
+                        checked = settings.autoMatchOnImport,
+                    ) { v -> onChange { it.copy(autoMatchOnImport = v) } }
+                    Explanation(
+                        "On import, over wifi only, and only for a route that arrived " +
+                            "without cues of its own. A route rides fine without them — " +
+                            "this just saves finding the button."
                     )
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
@@ -196,48 +315,45 @@ fun SettingsScreen(
 
             item {
                 Section("Offline maps") {
-                    Explanation(
-                        "Zoom levels quadruple the tile count each step, and the corridor " +
-                            "is how wide a strip either side of the route gets downloaded."
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        TileSource.ALL.forEachIndexed { i, source ->
-                            SegmentedButton(
-                                selected = settings.tileSource == source.key,
-                                onClick = { onChange { it.copy(tileSource = source.key) } },
-                                shape = SegmentedButtonDefaults.itemShape(i, TileSource.ALL.size),
-                            ) {
-                                Text(source.name.substringBefore(' '), maxLines = 1)
-                            }
-                        }
-                    }
-
-                    val source = TileSource.byKey(settings.tileSource)
-                    if (source.needsKey) {
-                        Spacer(Modifier.height(10.dp))
-                        OutlinedTextField(
-                            value = settings.thunderforestKey,
-                            onValueChange = { v -> onChange { it.copy(thunderforestKey = v.trim()) } },
-                            label = { Text("Thunderforest API key") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
+                    if (!source.canDownload) {
+                        Explanation(
+                            "${source.name} cannot be packed. Choose " +
+                                TileSource.DOWNLOADABLE.joinToString(", ") { it.name } +
+                                " under Map style to download one."
                         )
-                    }
+                    } else {
+                        Explanation(
+                            "Zoom levels quadruple the tile count each step, and the " +
+                                "corridor is how wide a strip either side of the route " +
+                                "gets downloaded. On the 29 km reference route at a 500 m " +
+                                "corridor: 431 tiles to z16, 1,425 to z17."
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        ValueSlider(
+                            label = "Deepest zoom",
+                            display = "z${settings.tileZoomMax}",
+                            value = settings.tileZoomMax.toFloat(),
+                            range = 13f..source.maxZoom.toFloat(),
+                        ) { v -> onChange { it.copy(tileZoomMax = v.roundToInt()) } }
 
-                    Spacer(Modifier.height(8.dp))
-                    ValueSlider(
-                        label = "Deepest zoom",
-                        display = "z${settings.tileZoomMax}",
-                        value = settings.tileZoomMax.toFloat(),
-                        range = 13f..source.maxZoom.toFloat(),
-                    ) { v -> onChange { it.copy(tileZoomMax = v.roundToInt()) } }
-                    MetreSlider(
-                        label = "Corridor",
-                        value = settings.tileBufferM,
-                        range = 200f..2_000f,
-                        units = settings.units,
-                    ) { v -> onChange { it.copy(tileBufferM = v) } }
+                        // Stopping short of the style's own maximum is a real
+                        // choice -- it is most of the pack -- but it should be a
+                        // knowing one rather than a blurry Close mode later.
+                        if (settings.tileZoomMax < source.maxZoom) {
+                            Explanation(
+                                "z${settings.tileZoomMax} packs get upscaled a step in " +
+                                    "Close mode. z${source.maxZoom} is ${source.name}'s own " +
+                                    "deepest level."
+                            )
+                        }
+
+                        MetreSlider(
+                            label = "Corridor",
+                            value = settings.tileBufferM,
+                            range = 200f..2_000f,
+                            units = settings.units,
+                        ) { v -> onChange { it.copy(tileBufferM = v) } }
+                    }
                 }
             }
 

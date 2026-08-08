@@ -46,6 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.kettenblatt.data.Route
+import de.kettenblatt.data.Settings
 import de.kettenblatt.data.Units
 import de.kettenblatt.map.MapMode
 import de.kettenblatt.map.RouteMapView
@@ -66,7 +67,7 @@ fun RoutePreviewScreen(
     route: Route,
     reversed: Boolean,
     offlineTiles: File?,
-    units: Units,
+    settings: Settings,
     prep: PrepState,
     onSetReversed: (Boolean) -> Unit,
     onPrepare: () -> Unit,
@@ -76,6 +77,7 @@ fun RoutePreviewScreen(
     onStart: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val units = settings.units
     val shown = remember(route, reversed) { if (reversed) route.reversed() else route }
 
     Scaffold(
@@ -140,6 +142,8 @@ fun RoutePreviewScreen(
                             mode = MapMode.OVERVIEW,
                             follow = false,
                             offlineTiles = offlineTiles,
+                            style = settings.mapStyle,
+                            styleApiKey = settings.tileApiKey,
                             onUserPan = {},
                             modifier = Modifier.fillMaxSize(),
                         )
@@ -151,6 +155,7 @@ fun RoutePreviewScreen(
                 PreparationCard(
                     route = route,
                     offlineTiles = offlineTiles,
+                    style = settings.mapStyle,
                     prep = prep,
                     onPrepare = onPrepare,
                     onDownloadTiles = onDownloadTiles,
